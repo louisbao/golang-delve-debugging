@@ -302,7 +302,116 @@ $ dlv debug --headless --listen=:2345 --log -- -myArg=123
          - `maxVariableRecurse`:  how far to recurse when evaluating nested types
          - `followPointers`:  requests pointers to be automatically dereferenced
 
-### 8. Official Delve Documentation 官方文档
+### 8. 结合 `Delve`, `Visual Studio Code` 和 `Docker` 进行远程调试
+
+编译 `Docker` 镜像 `remote-docker-hello`
+```bash
+$ cd examples/remote-docker-hello
+$ docker build -t remote-docker-hello .
+Sending build context to Docker daemon  5.632kB
+Step 1/8 : FROM golang:1.10.1-alpine3.7
+ ---> 52d894fca6d4
+Step 2/8 : ENV CGO_ENABLED 0
+ ---> Using cache
+ ---> d93c9ede307b
+Step 3/8 : RUN apk add --no-cache git
+ ---> Using cache
+ ---> 06e5f1017896
+Step 4/8 : RUN go get github.com/derekparker/delve/cmd/dlv
+ ---> Using cache
+ ---> 887fc1dc6455
+Step 5/8 : ADD . /go/src/remote-docker-hello
+ ---> dacab8d1bc41
+Step 6/8 : EXPOSE 8080 2345
+ ---> Running in af1058ec7ea9
+Removing intermediate container af1058ec7ea9
+ ---> 60f11d1a5be2
+Step 7/8 : WORKDIR /go/src/remote-docker-hello
+ ---> Running in 25b635156fb7
+Removing intermediate container 25b635156fb7
+ ---> ebdc9f8192a4
+Step 8/8 : CMD ["/go/bin/dlv", "debug", "--listen=0.0.0.0:2345", "--headless=true", "--api-version=2", "--log"]
+ ---> Running in 3889972371cc
+Removing intermediate container 3889972371cc
+ ---> ff6d52e2f5e6
+Successfully built ff6d52e2f5e6
+Successfully tagged remote-docker-hello:latest
+```
+
+该调试的基本原理是在 `Docker` 容器内同时打包 `dlv` 调试程序和程序源码(或编译过的二进制可执行文件)，详见 `Dockerfile`:
+
+```Dockerfile
+# Compile stage
+# FROM golang:1.10.1-alpine3.7 AS build-env
+FROM golang:1.10.1-alpine3.7
+
+# Cgo enables the creation of Go packages that call C code, set to 0 to disable it
+ENV CGO_ENABLED 0
+
+# Compile Delve
+RUN apk add --no-cache git
+RUN go get github.com/derekparker/delve/cmd/dlv
+
+ADD . /go/src/remote-docker-hello
+
+# The -gcflags "all=-N -l" flag helps us get a better debug experience
+# RUN go build -gcflags "all=-N -l" -o /remote-docker-hello remote-docker-hello
+
+# Final stage
+# FROM alpine:3.7
+ 
+# Port 8080 belongs to our application, 2345 belongs to Delve
+EXPOSE 8080 2345
+
+# Allow delve to run on Alpine based containers.
+# RUN apk add --no-cache libc6-compat
+
+WORKDIR /go/src/remote-docker-hello
+
+# COPY --from=build-env /remote-docker-hello /
+# COPY --from=build-env /go/bin/dlv /
+
+# Run delve
+CMD ["/go/bin/dlv", "debug", "--listen=0.0.0.0:2345", "--headless=true", "--api-version=2", "--log"]
+```
+
+编译完成后启动容器，并将 `dlv` 监听端口 `2345` 和源码程序监听端口 `8080`，分别绑定好本机的 `2345` 和 `8080` 端口。
+
+```bash
+$ docker run --rm --name=remote-docker-hello --privileged -p 8080:8080 -p 2345:2345 --security-opt="apparmor=unconfined" --cap-add=SYS_PTRACE remote-docker-hello
+
+API server listening at: [::]:2345
+time="2018-12-10T06:28:59Z" level=info msg="launching process with args: [/go/src/remote-docker-hello/debug]" layer=debugger
+```
+
+> 注意: 运行容器时需要加入以下参数 `–security-opt=”apparmor=unconfined” –cap-add=SYS_PTRACE`，否则的话 `dlv` 无法启动进程: fork/exec <binary>: operation not permitted.
+
+可以看到 `dlv` 以非交互模式开始运行并绑定到 `2345` 端口，这是可以用 `VS Code` 打开 `examples/remote-docker-hello` 代码，并在 `main.go` 文件第20行断点。
+点击 `VS Code` 的 Debug 界面左上角的绿色三角按钮开始调试（需要选中 `Connect to remote docker hello` 配置），见截屏1:
+
+![Screenshot 1](examples/remote-docker-hello/img/vscode1.png)
+
+这时本地 `VS Code` 将调试信息发送到容器内 `dlv` 服务器，由 `dlv` 服务器启动 `remote-docker-hello` 程序，相应的变化可以在终端看到:
+
+```bash
+...
+
+time="2018-12-10T06:36:17Z" level=info msg="created breakpoint: &api.Breakpoint{ID:1, Name:\"\", Addr:0x6e263f, File:\"/go/src/remote-docker-hello/main.go\", Line:20, FunctionName:\"main.hello\", Cond:\"\", Tracepoint:false, TraceReturn:false, Goroutine:false, Stacktrace:0, Variables:[]string(nil), LoadArgs:(*api.LoadConfig)(0xc4207cf8f0), LoadLocals:(*api.LoadConfig)(0xc4207cf920), HitCount:map[string]uint64{}, TotalHitCount:0x0}" layer=debugger
+time="2018-12-10T06:36:17Z" level=debug msg=continuing layer=debugger
+hello server is runing on port: 8080
+```
+
+运行一下 `curl` 对容器内的 `remote-docker-hello` 程序进行访问：
+
+```bash
+curl localhost:8080/hello
+```
+
+最后 `VS Code` 就可以从容器内获取所需的信息开始调试，见截图2：
+
+![Screenshot 2](examples/remote-docker-hello/img/vscode2.png)
+
+### 9. Official Delve Documentation 官方文档
 
 - [Installation](https://github.com/derekparker/delve/tree/master/Documentation/installation)
   - [Linux](https://github.com/derekparker/delve/blob/master/Documentation/installation/linux/install.md)
